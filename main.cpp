@@ -2,7 +2,7 @@
 #include <boost/program_options.hpp>
 #include "include/common.hpp"
 #include "include/scenario.hpp"
-#include "include/NATCBS/natcbs.hpp"
+#include "include/ACS/acs.hpp"
 #include <cstdlib>
 #include <iomanip>
 #include <filesystem>
@@ -11,7 +11,7 @@
 auto parse_args(int argc, char** argv){
     namespace po = boost::program_options;
     po::options_description desc("Allowed options");
-    constexpr static const char* allowed_solvers[] = {"NATCBS"};
+    constexpr static const char* allowed_solvers[] = {"ACS"};
     desc.add_options()
     ("help", "produce help message")
     ("map,m", po::value<std::string>()->required(), "map file ([map_name].map)")
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
     Timer timer;
     timer.reset();
     shared_ptr<Plan> plan =
-            (solver_name == "NATCBS") ? NATCBS(*scenario, verbose).solve(time_limit, time_limit_reached) :
+            (solver_name == "ACS") ? ACS(*scenario, verbose).solve(time_limit, time_limit_reached) :
             nullptr;
     timer.stop();
     auto elapsed_seconds = timer.elapsed_seconds();
