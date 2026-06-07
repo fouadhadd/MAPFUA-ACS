@@ -192,14 +192,17 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
             Location loc1 = path->get_location_at_time(t);
             Location loc2 = path->get_location_at_time(t + 1);
 
-            // 1. Block the vertex (Prevents standing on or crossing the occupied tile)
-            auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t, loc2));
+            // 1. Block the true VERTEX GADGET (The "Master Switch")
+            // Severs the IN -> OUT flow. Makes it mathematically impossible to wait on OR step onto loc2 at t+1.
             auto v_in_it = node_to_idx.find(FlowNode(FlowNode::Type::IN, t + 1, loc2));
-            if (v_out_it != node_to_idx.end() && v_in_it != node_to_idx.end()) {
-                update_single_edge_cap(v_out_it->second, v_in_it->second, BLOCKED_CAP);
+            auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t + 1, loc2));
+
+            if (v_in_it != node_to_idx.end() && v_out_it != node_to_idx.end()) {
+                update_single_edge_cap(v_in_it->second, v_out_it->second, BLOCKED_CAP);
             }
 
             // 2. Block the edge (Prevents head-on edge collisions or swapping places)
+            // Your logic here is already perfectly correct!
             if (loc1 != loc2) {
                 std::pair edge = (loc1 < loc2) ? std::make_pair(loc1, loc2) : std::make_pair(loc2, loc1);
 
@@ -269,10 +272,6 @@ UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::solve_flow() {
     const auto num_arcs = static_cast<ArcIndex>(arc_tail.size());
     assert(num_nodes > 0);
 
-    if (arc_tail.size() != num_arcs || arc_cost.size() != num_arcs || arc_cap.size() != num_arcs) {
-        return INFEASIBLE;
-    }
-
     // Feasibility checking, and possible supply/demand adjustment, is done by:
     // 1. Creating a new source and sink node.
     // 2. Taking all nodes that have a non-zero supply or demand and connecting them to the source or sink
@@ -321,65 +320,51 @@ UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::solve_flow() {
         return INFEASIBLE;
     }
 
-    std::cout << maximum_flow << std::endl;
-
-    size_t num = idx_to_node.size();
-    for (size_t i = 0; i < arc_tail.size(); ++i) {
-        if (arc_tail[i] >= num || arc_head[i] >= num) {
-            std::cerr << "DEBUG: Poison index found at arc " << i
-                      << ": " << arc_tail[i] << " -> " << arc_head[i]
-                      << " (Num nodes: " << num << ")" << std::endl;
-            // If this prints, your get_node_idx() logic is creating arcs for nodes
-            // that aren't in the current node index map.
-        }
-    }
-
-    // --- 1. USE SIMPLE MIN COST FLOW INSTEAD ---
-    operations_research::SimpleMinCostFlow min_cost_flow;
-
-    // 2. Add all map edges directly to the solver using your raw arrays.
-    // NO PermutedArc needed! The order you add them is the order they are stored.
+    MinCostFlow min_cost_flow(&graph);
     ArcIndex arc;
     for (arc = 0; arc < num_arcs; ++arc) {
-        min_cost_flow.AddArcWithCapacityAndUnitCost(arc_tail[arc], arc_head[arc], arc_cap[arc], arc_cost[arc]);
+        ArcIndex permuted_arc = PermutedArc(arc);
+        min_cost_flow.SetArcUnitCost(permuted_arc, arc_cost.at(arc));
+        min_cost_flow.SetArcCapacity(permuted_arc, arc_cap.at(arc));
     }
 
-    // 3. Add the structural source and sink edges
-    min_cost_flow.AddArcWithCapacityAndUnitCost(total_source, source_idx, num_of_unassigned_agents, NO_COST);
-    min_cost_flow.AddArcWithCapacityAndUnitCost(sink_idx, total_sink, num_of_unassigned_agents, NO_COST);
+    for(; arc < augmented_num_arcs - 2; ++arc) {
+        ArcIndex permuted_arc = PermutedArc(arc);
+        min_cost_flow.SetArcUnitCost(permuted_arc, NO_COST);
+        min_cost_flow.SetArcCapacity(permuted_arc, CAP);
+    }
 
-    // 4. Set Supplies
+    ArcIndex permuted_arc = PermutedArc(arc++);
+    min_cost_flow.SetArcUnitCost(permuted_arc, NO_COST);
+    min_cost_flow.SetArcCapacity(permuted_arc, num_of_unassigned_agents);
+    permuted_arc = PermutedArc(arc);
+    min_cost_flow.SetArcUnitCost(permuted_arc, NO_COST);
+    min_cost_flow.SetArcCapacity(permuted_arc, num_of_unassigned_agents);
+
     min_cost_flow.SetNodeSupply(total_source, maximum_flow);
     min_cost_flow.SetNodeSupply(total_sink, -maximum_flow);
+    min_cost_flow.SetCheckFeasibility(false);
 
-    // 5. Solve and Extract cleanly
     arc_flow.resize(num_arcs);
     flow.clear();
-
-    // SimpleMinCostFlow handles all feasibility checks internally and safely.
-    if (min_cost_flow.Solve() == operations_research::MinCostFlowBase::OPTIMAL) {
-        optimal_cost = static_cast<CostValue>(min_cost_flow.OptimalCost());
-
+    if (min_cost_flow.Solve()) {
+        optimal_cost = static_cast<CostValue>(min_cost_flow.GetOptimalCost());
         for (arc = 0; arc < num_arcs; ++arc) {
-            // Because we didn't permute, mcf.Flow(arc) perfectly matches arc_tail[arc]
-            arc_flow[arc] = static_cast<FlowQuantity>(min_cost_flow.Flow(arc));
+            arc_flow[arc] = static_cast<FlowQuantity>(min_cost_flow.Flow(PermutedArc(arc)));
             if (arc_flow[arc] > 0) {
                 if (verbose){
-                    std::cout << "f " << idx_to_node.at(arc_tail[arc]) << " -> "
-                              << idx_to_node.at(arc_head[arc]) << " " << arc_flow[arc] << std::endl;
+                    std::cout << "f " << idx_to_node.at(arc_tail.at(arc)) << " -> " << idx_to_node.at(arc_head.at(arc)) << " " << arc_flow[arc] << std::endl;
                 }
-                flow[arc_tail[arc]] = arc_head[arc];
+                flow[arc_tail.at(arc)] = arc_head.at(arc);
             }
         }
-    } else {
-        return INFEASIBLE;
     }
+    auto status = min_cost_flow.status();
+    assert(status == operations_research::MinCostFlow::OPTIMAL);
 
     if (verbose) {
         this->print_flow();
     }
-
-    std::cout << optimal_cost << std::endl;
 
     return SUCCESS;
 }
