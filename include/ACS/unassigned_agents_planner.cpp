@@ -192,8 +192,7 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
             Location loc1 = path->get_location_at_time(t);
             Location loc2 = path->get_location_at_time(t + 1);
 
-            // 1. Block the true VERTEX GADGET (The "Master Switch")
-            // Severs the IN -> OUT flow. Makes it mathematically impossible to wait on OR step onto loc2 at t+1.
+            // 1. Block the vertex at t when an assigned agent is located.
             auto v_in_it = node_to_idx.find(FlowNode(FlowNode::Type::IN, t + 1, loc2));
             auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t + 1, loc2));
 
@@ -201,8 +200,7 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
                 update_single_edge_cap(v_in_it->second, v_out_it->second, BLOCKED_CAP);
             }
 
-            // 2. Block the edge (Prevents head-on edge collisions or swapping places)
-            // Your logic here is already perfectly correct!
+            // 2. Block the edge (Prevents head-on edge collisions or swapping places) at t when assigned agent is located.
             if (loc1 != loc2) {
                 std::pair edge = (loc1 < loc2) ? std::make_pair(loc1, loc2) : std::make_pair(loc2, loc1);
 
@@ -218,27 +216,9 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
 }
 
 void UnassignedAgentsPlanner::update_single_edge_cap(NodeIndex tail, NodeIndex head, FlowQuantity cap) {
-    // 1. Safely look up the arc without using .at() to prevent out-of-range crashes
-    auto it = arc_map.find(tail);
-    if (it != arc_map.end()) {
-        auto it2 = it->second.find(head);
-        if (it2 != it->second.end()) {
-            ArcIndex arc = it2->second;
-
-            // 2. Critical bounds check to stop 0xC0000005 segmentation faults
-            if (arc >= 0 && arc < static_cast<ArcIndex>(arc_cap.size())) {
-
-                // 3. Save the old CAPACITY
-                orig_edge_caps.emplace(arc, arc_cap[arc]);
-
-                // 4. Apply the new hard block
-                arc_cap[arc] = cap;
-
-                // 5. CRITICAL: Track it so the Cleanup Crew can fix it later!
-                deleted_arcs.emplace(arc);
-            }
-        }
-    }
+    ArcIndex arc = get_arc_idx(tail, head);
+    orig_edge_caps.emplace(arc, arc_cap.at(arc));
+    arc_cap[arc] = cap;
 }
 
 UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::find_paths(const vector<shared_ptr<TimedPath>>
