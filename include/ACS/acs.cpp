@@ -1,8 +1,12 @@
 #include "acs.hpp"
 
 ACS::ACS(int map_rows, int map_cols, vector<vector<CellType>> &map,
-         vector<Location> &agent_start_locations, vector<Location> &assigned_goal_locations, bool verbose) :
-        num_of_assigned(static_cast<int>(agent_start_locations.size())), verbose(verbose) {
+         vector<Location> &agent_start_locations, vector<Location> &assigned_goal_locations,
+         vector<Location> &unassigned_start_locations, bool verbose) :
+        num_of_assigned(static_cast<int>(agent_start_locations.size())),
+        num_of_unassigned(static_cast<int>(unassigned_start_locations.size())),
+        verbose(verbose),
+        unassigned_planner(map_rows, map_cols, map, unassigned_start_locations, verbose) {
 
         for (int i = 0; i < num_of_assigned; i++) {
             assigned_start_ts.push_back(0);
@@ -15,7 +19,7 @@ ACS::ACS(int map_rows, int map_cols, vector<vector<CellType>> &map,
 
 ACS::ACS(Scenario &scenario, bool verbose) :
     ACS(scenario.map_rows, scenario.map_cols, scenario.map, scenario.assigned_start_locations,
-        scenario.assigned_goal_locations, verbose) {}
+        scenario.assigned_goal_locations, scenario.unassigned_start_locations, verbose) {}
 
 shared_ptr<Plan> ACS::solve(int timeout) {
     bool time_limit_exceeded;
@@ -59,13 +63,24 @@ shared_ptr<Plan> ACS::solve(int time_limit, bool& time_limit_exceeded) {
         }
 
         if (verbose) {
-            std::cout << "Conflict-free backbone found." << std::endl;
+            std::cout << "Conflict-free backbone found. Starting Phase 2: Planning unassigned agents..." << std::endl;
         }
 
-        // Empty vector for the unassigned agents (fix in Phase 2 implementation)
-        vector<shared_ptr<TimedPath>> empty_unassigned;
+        // Phase 2: Plan unassigned agents using network flow
+        if (num_of_unassigned > 0) {
+            auto unassigned_result = unassigned_planner.find_paths(node->assigned_paths, node->cost);
+            if (unassigned_result != UnassignedAgentsPlanner::SUCCESS) {
+                if (verbose) {
+                    std::cout << "Phase 2 failed: Could not plan unassigned agents. Backtracking..." << std::endl;
+                }
+                continue;
+            }
+            if (verbose) {
+                std::cout << "Phase 2 succeeded: Unassigned agents planned successfully." << std::endl;
+            }
+        }
 
-        return std::make_shared<Plan>(node->assigned_paths, empty_unassigned);
+        return std::make_shared<Plan>(node->assigned_paths, unassigned_planner.unassigned_agent_paths);
     }
     return nullptr;
 }
