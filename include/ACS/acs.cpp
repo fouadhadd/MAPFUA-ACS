@@ -69,12 +69,24 @@ shared_ptr<Plan> ACS::solve(int time_limit, bool& time_limit_exceeded) {
         // Phase 2: Plan unassigned agents using network flow
         if (num_of_unassigned > 0) {
             auto unassigned_result = unassigned_planner.find_paths(node->assigned_paths, node->cost);
-            if (unassigned_result != UnassignedAgentsPlanner::SUCCESS) {
+
+            if (unassigned_result == UnassignedAgentsPlanner::CONFLICT) {
                 if (verbose) {
-                    std::cout << "Phase 2 failed: Could not plan unassigned agents. Backtracking..." << std::endl;
+                    std::cout << "Phase 2 Conflict: " << *unassigned_planner.capacity_conflict << std::endl;
                 }
+
+                // Branch the tree to break the trap
+                auto children = resolve_capacity_conflict(node, unassigned_planner.capacity_conflict);
+                if (children.first) open_list.push(children.first);
+                if (children.second) open_list.push(children.second);
+
                 continue;
             }
+            else if (unassigned_result == UnassignedAgentsPlanner::INFEASIBLE) {
+                if (verbose) std::cout << "Phase 2 failed. Infeasible. Backtracking..." << std::endl;
+                continue;
+            }
+
             if (verbose) {
                 std::cout << "Phase 2 succeeded: Unassigned agents planned successfully." << std::endl;
             }
@@ -166,4 +178,34 @@ ACS::resolve_assigned_conflict(const shared_ptr<ACSNode>& node, const shared_ptr
         pos_child->assigned_paths[i] = pos_path;
     }
     return {neg_child, pos_child};
+}
+
+std::pair<shared_ptr<ACSNode>, shared_ptr<ACSNode>>
+ACS::resolve_capacity_conflict(const shared_ptr<ACSNode> &node, const shared_ptr<CapacityConflict> &conflict) {
+    bool is_vertex = (conflict->location1 == conflict->location2);
+    VertexConstraint v_cons(conflict->time, conflict->location1);
+    EdgeConstraint e_cons(conflict->time, conflict->location1, conflict->location2);
+
+    // Only Negative Constraint Branch
+    shared_ptr<ACSNode> neg_child = std::make_shared<ACSNode>(node_count++, node);
+    shared_ptr<Constraints> neg_cons = std::make_shared<Constraints>(*node->constraint_table[conflict->assigned_id]);
+
+    if (is_vertex) {
+        neg_cons->add_negative_vertex_constraint(v_cons);
+    } else {
+        neg_cons->add_negative_edge_constraint(e_cons);
+    }
+
+    neg_child->constraint_table[conflict->assigned_id] = neg_cons;
+    shared_ptr<TimedPath> neg_path = plan_single_assigned_path(conflict->assigned_id, neg_cons);
+
+    if (neg_path) {
+        neg_child->cost = std::max(neg_child->cost, neg_path->back().time);
+        neg_child->assigned_paths[conflict->assigned_id] = neg_path;
+
+        // Return ONLY the negative branch. The positive branch is mathematically invalid here.
+        return {neg_child, nullptr};
+    }
+
+    return {nullptr, nullptr};
 }

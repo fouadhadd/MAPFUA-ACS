@@ -43,6 +43,10 @@ private:
     // Standard CBS branching: Creates child nodes to resolve a collision
     std::pair<shared_ptr<ACSNode>, shared_ptr<ACSNode>>
     resolve_assigned_conflict(const shared_ptr<ACSNode>& node, const shared_ptr<Conflict>& conflict);
+
+    // Resolves traps detected by the flow solver
+    std::pair<shared_ptr<ACSNode>, shared_ptr<ACSNode>>
+    resolve_capacity_conflict(const shared_ptr<ACSNode>& node, const shared_ptr<CapacityConflict>& conflict);
 };
 
 #endif //MAPFUA_ACS_HPP

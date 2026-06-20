@@ -1,7 +1,6 @@
 #include "unassigned_agents_planner.hpp"
 #include "ortools/graph/max_flow.h"
 
-
 UnassignedAgentsPlanner::UnassignedAgentsPlanner(int map_rows, int map_cols, const vector<vector<CellType>> &map,
                          vector<Location> &unassigned_agent_start_locations, bool verbose) :
         map_rows(map_rows), map_cols(map_cols), map(map), num_of_unassigned_agents(static_cast<int>(unassigned_agent_start_locations.size())),
@@ -184,7 +183,10 @@ void UnassignedAgentsPlanner::update_graph(int makespan) {
 }
 
 void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_ptr<TimedPath>> &assigned_agents_paths) {
-    for (auto &path : assigned_agents_paths) {
+    blocked_arcs_info.clear();
+
+    for (int i = 0; i < assigned_agents_paths.size(); ++i) {
+        auto& path = assigned_agents_paths[i];
         if (!path || path->empty()) continue;
 
         int last_t = std::min(current_makespan, path->back().time);
@@ -197,7 +199,8 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
             auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t + 1, loc2));
 
             if (v_in_it != node_to_idx.end() && v_out_it != node_to_idx.end()) {
-                update_single_edge_cap(v_in_it->second, v_out_it->second, BLOCKED_CAP);
+                ArcIndex arc = update_single_edge_cap(v_in_it->second, v_out_it->second, BLOCKED_CAP);
+                blocked_arcs_info[arc] = {i, loc1, loc2, t + 1};
             }
 
             // 2. Block the edge (Prevents head-on edge collisions or swapping places) at t when assigned agent is located.
@@ -208,21 +211,35 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
                 auto edge_out_it = node_to_idx.find(FlowNode(FlowNode::Type::EDGE_OUT, t + 1, edge.first, edge.second));
 
                 if (edge_in_it != node_to_idx.end() && edge_out_it != node_to_idx.end()) {
-                    update_single_edge_cap(edge_in_it->second, edge_out_it->second, BLOCKED_CAP);
+                    ArcIndex arc = update_single_edge_cap(edge_in_it->second, edge_out_it->second, BLOCKED_CAP);
+                    blocked_arcs_info[arc] = {i, loc1, loc2, t + 1};
+                }
+            }
+
+            // 3. NEW LOGIC: Lock the final resting location forever
+            Location goal_loc = path->back().location;
+            for (int t = last_t; t < current_makespan; t++) {
+                auto v_in_it = node_to_idx.find(FlowNode(FlowNode::Type::IN, t + 1, goal_loc));
+                auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t + 1, goal_loc));
+
+                if (v_in_it != node_to_idx.end() && v_out_it != node_to_idx.end()) {
+                    ArcIndex arc = update_single_edge_cap(v_in_it->second, v_out_it->second, BLOCKED_CAP);
+                    blocked_arcs_info[arc] = {i, goal_loc, goal_loc, t + 1};
                 }
             }
         }
     }
 }
 
-void UnassignedAgentsPlanner::update_single_edge_cap(NodeIndex tail, NodeIndex head, FlowQuantity cap) {
+UnassignedAgentsPlanner::ArcIndex UnassignedAgentsPlanner::update_single_edge_cap(NodeIndex tail, NodeIndex head, FlowQuantity cap) {
     ArcIndex arc = get_arc_idx(tail, head);
     orig_edge_caps.emplace(arc, arc_cap.at(arc));
     arc_cap[arc] = cap;
+    deleted_arcs.emplace(arc);
+    return arc;
 }
 
-UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::find_paths(const vector<shared_ptr<TimedPath>>
-                                                                        &assigned_agents_paths, int makespan) {
+UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::find_paths(const vector<shared_ptr<TimedPath>> &assigned_agents_paths, int makespan) {
     if (num_of_unassigned_agents == 0) return SUCCESS;
 
     for (auto arc : deleted_arcs) {
@@ -241,7 +258,7 @@ UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::find_paths(const vector
         return result;
     }
 
-    return this->extract_agent_paths();
+    return this->extract_unassigned_agent_paths(assigned_agents_paths);
 }
 
 UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::solve_flow() {
@@ -297,7 +314,7 @@ UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::solve_flow() {
     }
 
     if (maximum_flow != num_of_unassigned_agents) {
-        return INFEASIBLE;
+        return extract_capacity_conflict();
     }
 
     MinCostFlow min_cost_flow(&graph);
@@ -349,11 +366,54 @@ UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::solve_flow() {
     return SUCCESS;
 }
 
+UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::extract_capacity_conflict() {
+    // 1. BFS to find reachable set
+    std::unordered_set<NodeIndex> reachable;
+    std::queue<NodeIndex, std::list<NodeIndex>> q;
+    q.push(source_idx);
+    reachable.insert(source_idx);
+
+    while (!q.empty()) {
+        NodeIndex curr = q.front();
+        q.pop();
+        auto it = arc_map.find(curr);
+        if (it != arc_map.end()) {
+            for (const auto& [next_node, arc] : it->second) {
+                if (arc_cap[arc] > 0 && !reachable.count(next_node)) {
+                    reachable.insert(next_node);
+                    q.push(next_node);
+                }
+            }
+        }
+    }
+
+    // 2. Scan ledger to find Min-Cut boundary
+    for (const auto& [arc, block_data] : blocked_arcs_info) {
+        NodeIndex tail = arc_tail[arc];
+        NodeIndex head = arc_head[arc];
+
+        // Tail is wet, Head is dry -> We found the wall!
+        if (reachable.count(tail) && !reachable.count(head)) {
+            this->capacity_conflict = std::make_shared<CapacityConflict>(
+                block_data.agent_id, block_data.loc1, block_data.loc2, block_data.t - 1);
+
+            if (verbose) {
+                std::cout << "DEBUG: Min-Cut trap found! Blaming Assigned Agent "
+                          << block_data.agent_id << std::endl;
+            }
+            return CONFLICT;
+        }
+    }
+
+    return INFEASIBLE;
+}
+
 UnassignedAgentsPlanner::ArcIndex UnassignedAgentsPlanner::PermutedArc(ArcIndex arc) const {
     return arc < static_cast<int>(arc_permutation.size()) ? arc_permutation[arc] : arc;
 }
 
-UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::extract_agent_paths() {
+UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::extract_unassigned_agent_paths(
+    const vector<shared_ptr<TimedPath>> &assigned_agents_paths) {
     for (int a_i = 0; a_i < num_of_unassigned_agents; ++a_i) {
         unassigned_agent_paths[a_i] = std::make_shared<TimedPath>();
         unassigned_agent_paths[a_i]->push_back(State(0, unassigned_agent_start_locations[a_i]));

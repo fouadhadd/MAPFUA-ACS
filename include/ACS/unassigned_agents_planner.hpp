@@ -3,9 +3,11 @@
 
 #include "flow_node.hpp"
 #include "../constraints/constraints.hpp"
-#include "../ACS/realization_conflict.hpp"
+#include "../ACS/capacity_conflict.hpp"
 #include "ortools/graph/min_cost_flow.h"
 #include "ortools/graph/graph.h"
+#include <queue>
+#include <list>
 
 class UnassignedAgentsPlanner {
 public:
@@ -70,6 +72,15 @@ private:
     unordered_map<int, array<int, 3>> makespan_graph_params;
     unordered_map<int, vector<ArcIndex>> makespan_to_arc_permutation;
 
+    struct BlockData {
+        int agent_id;
+        Location loc1;
+        Location loc2;
+        int t;
+    };
+
+    unordered_map<ArcIndex, BlockData> blocked_arcs_info;
+
     NodeIndex get_node_idx(const FlowNode &node);
     ArcIndex get_arc_idx(NodeIndex tail, NodeIndex head);
     void add_arc(NodeIndex tail, NodeIndex head, CostValue cost);
@@ -78,20 +89,22 @@ private:
     void update_graph(int makespan);
 
     void block_assigned_agents_paths(const vector<shared_ptr<TimedPath>> &assigned_agents_paths);
-    void update_single_edge_cap(NodeIndex n1, NodeIndex n2, CostValue cost);
+    ArcIndex update_single_edge_cap(NodeIndex n1, NodeIndex n2, FlowQuantity cap);
     Result solve_flow();
+    Result extract_capacity_conflict();
     ArcIndex PermutedArc(ArcIndex arc) const;
     void print_flow();
 
 public:
     vector<shared_ptr<TimedPath>> unassigned_agent_paths;
+    shared_ptr<CapacityConflict> capacity_conflict;
 
     UnassignedAgentsPlanner(int map_rows, int map_cols, const vector<vector<CellType>> &map, vector<Location>
                                 &unassigned_agent_start_locations, bool verbose);
 
     Result find_paths(const vector<shared_ptr<TimedPath>>& assigned_agents_paths, int makespan);
 
-    Result extract_agent_paths();
+    Result extract_unassigned_agent_paths(const vector<shared_ptr<TimedPath>> &assigned_agents_paths);
 };
 
 
