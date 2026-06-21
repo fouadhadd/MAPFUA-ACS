@@ -189,12 +189,30 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
         auto& path = assigned_agents_paths[i];
         if (!path || path->empty()) continue;
 
+        // --- 1. NEW FIX: Start-Wait Padding ---
+        // If the agent's path doesn't start at t=0, it means it waited at its start location.
+        int first_t = path->front().time;
+        Location start_loc = path->front().location;
+
+        // Block the start location for all ticks up to and including first_t
+        for (int t = 0; t <= first_t; t++) {
+            auto v_in_it = node_to_idx.find(FlowNode(FlowNode::Type::IN, t, start_loc));
+            auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t, start_loc));
+
+            if (v_in_it != node_to_idx.end() && v_out_it != node_to_idx.end()) {
+                ArcIndex arc = update_single_edge_cap(v_in_it->second, v_out_it->second, BLOCKED_CAP);
+                blocked_arcs_info[arc] = {i, start_loc, start_loc, t};
+            }
+        }
+
         int last_t = std::min(current_makespan, path->back().time);
-        for (int t = path->front().time; t < last_t; t++) {
+
+        // 2. Block the explicitly traversed path
+        for (int t = first_t; t < last_t; t++) {
             Location loc1 = path->get_location_at_time(t);
             Location loc2 = path->get_location_at_time(t + 1);
 
-            // 1. Block the vertex at t when an assigned agent is located.
+            // Block the vertex at t+1 when an assigned agent is located
             auto v_in_it = node_to_idx.find(FlowNode(FlowNode::Type::IN, t + 1, loc2));
             auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t + 1, loc2));
 
@@ -203,7 +221,7 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
                 blocked_arcs_info[arc] = {i, loc1, loc2, t + 1};
             }
 
-            // 2. Block the edge (Prevents head-on edge collisions or swapping places) at t when assigned agent is located.
+            // Block the edge (Prevents head-on edge collisions or swapping places)
             if (loc1 != loc2) {
                 std::pair edge = (loc1 < loc2) ? std::make_pair(loc1, loc2) : std::make_pair(loc2, loc1);
 
@@ -215,17 +233,18 @@ void UnassignedAgentsPlanner::block_assigned_agents_paths(const vector<shared_pt
                     blocked_arcs_info[arc] = {i, loc1, loc2, t + 1};
                 }
             }
+        }
 
-            // 3. NEW LOGIC: Lock the final resting location forever
-            Location goal_loc = path->back().location;
-            for (int t = last_t; t < current_makespan; t++) {
-                auto v_in_it = node_to_idx.find(FlowNode(FlowNode::Type::IN, t + 1, goal_loc));
-                auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t + 1, goal_loc));
+        // --- 3. MOVED OUTSIDE: Lock the final resting location forever ---
+        Location goal_loc = path->back().location;
+        // Using <= current_makespan to ensure the final tick is caught
+        for (int t = last_t; t <= current_makespan; t++) {
+            auto v_in_it = node_to_idx.find(FlowNode(FlowNode::Type::IN, t + 1, goal_loc));
+            auto v_out_it = node_to_idx.find(FlowNode(FlowNode::Type::OUT, t + 1, goal_loc));
 
-                if (v_in_it != node_to_idx.end() && v_out_it != node_to_idx.end()) {
-                    ArcIndex arc = update_single_edge_cap(v_in_it->second, v_out_it->second, BLOCKED_CAP);
-                    blocked_arcs_info[arc] = {i, goal_loc, goal_loc, t + 1};
-                }
+            if (v_in_it != node_to_idx.end() && v_out_it != node_to_idx.end()) {
+                ArcIndex arc = update_single_edge_cap(v_in_it->second, v_out_it->second, BLOCKED_CAP);
+                blocked_arcs_info[arc] = {i, goal_loc, goal_loc, t + 1};
             }
         }
     }
@@ -387,22 +406,41 @@ UnassignedAgentsPlanner::Result UnassignedAgentsPlanner::extract_capacity_confli
         }
     }
 
+    capacity_conflicts.clear(); // Ensure the vector is empty before scanning
+
     // 2. Scan ledger to find Min-Cut boundary
+    capacity_conflicts.clear();
+
     for (const auto& [arc, block_data] : blocked_arcs_info) {
         NodeIndex tail = arc_tail[arc];
         NodeIndex head = arc_head[arc];
 
         // Tail is wet, Head is dry -> We found the wall!
         if (reachable.count(tail) && !reachable.count(head)) {
-            this->capacity_conflict = std::make_shared<CapacityConflict>(
-                block_data.agent_id, block_data.loc1, block_data.loc2, block_data.t - 1);
+
+            bool is_duplicate = false;
+            for (const auto& existing : capacity_conflicts) {
+                if (existing->assigned_id == block_data.agent_id &&
+                    existing->time == block_data.t - 1) {
+                        is_duplicate = true;
+                        break;
+                    }
+            }
+
+            if (is_duplicate) continue;
+
+            capacity_conflicts.push_back(std::make_shared<CapacityConflict>(
+                block_data.agent_id, block_data.loc1, block_data.loc2, block_data.t - 1));
 
             if (verbose) {
                 std::cout << "DEBUG: Min-Cut trap found! Blaming Assigned Agent "
-                          << block_data.agent_id << std::endl;
+                          << block_data.agent_id << " at time " << block_data.t - 1 << std::endl;
             }
-            return CONFLICT;
         }
+    }
+
+    if (!capacity_conflicts.empty()) {
+        return CONFLICT;
     }
 
     return INFEASIBLE;

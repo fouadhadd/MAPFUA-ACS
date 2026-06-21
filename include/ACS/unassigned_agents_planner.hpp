@@ -97,7 +97,7 @@ private:
 
 public:
     vector<shared_ptr<TimedPath>> unassigned_agent_paths;
-    shared_ptr<CapacityConflict> capacity_conflict;
+    std::vector<shared_ptr<CapacityConflict>> capacity_conflicts;
 
     UnassignedAgentsPlanner(int map_rows, int map_cols, const vector<vector<CellType>> &map, vector<Location>
                                 &unassigned_agent_start_locations, bool verbose);

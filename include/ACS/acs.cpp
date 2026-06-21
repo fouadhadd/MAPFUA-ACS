@@ -72,13 +72,38 @@ shared_ptr<Plan> ACS::solve(int time_limit, bool& time_limit_exceeded) {
 
             if (unassigned_result == UnassignedAgentsPlanner::CONFLICT) {
                 if (verbose) {
-                    std::cout << "Phase 2 Conflict: " << *unassigned_planner.capacity_conflict << std::endl;
+                    std::cout << "Phase 2 Conflict: Min-cut traps detected. "
+                              << "Isolating earliest constraints per agent..." << std::endl;
                 }
 
-                // Branch the tree to break the trap
-                auto children = resolve_capacity_conflict(node, unassigned_planner.capacity_conflict);
-                if (children.first) open_list.push(children.first);
-                if (children.second) open_list.push(children.second);
+                // 1. Group conflicts by Agent ID and find the earliest time for EACH agent
+                std::map<int, shared_ptr<CapacityConflict>> earliest_conflict_per_agent;
+
+                for (const auto& cap_conflict : unassigned_planner.capacity_conflicts) {
+                    int a_id = cap_conflict->assigned_id;
+
+                    // If we haven't seen this agent yet, or if this conflict is earlier than the stored one
+                    if (earliest_conflict_per_agent.find(a_id) == earliest_conflict_per_agent.end() ||
+                        cap_conflict->time < earliest_conflict_per_agent[a_id]->time) {
+
+                        earliest_conflict_per_agent[a_id] = cap_conflict;
+                        }
+                }
+
+                if (verbose) {
+                    std::cout << "Branching safely on " << earliest_conflict_per_agent.size()
+                              << " unique agents to guarantee mathematical completeness." << std::endl;
+                }
+
+                // 2. Create EXACTLY ONE branch for each agent responsible for the bottleneck
+                for (const auto& [a_id, cap_conflict] : earliest_conflict_per_agent) {
+                    auto children = resolve_capacity_conflict(node, cap_conflict);
+
+                    // Push the valid negative branch
+                    if (children.first) {
+                        open_list.push(children.first);
+                    }
+                }
 
                 continue;
             }
